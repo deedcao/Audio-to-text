@@ -1,0 +1,5 @@
+{
+  "name": "AudioGlot AI",
+  "description": "A professional audio transcription and translation tool powered by Gemini 2.5 Flash. Upload WAV, MP3, or M4A files to instantly transcribe speech to text with speaker identification and translate it into multiple global languages.",
+  "requestFramePermissions": []
+}
