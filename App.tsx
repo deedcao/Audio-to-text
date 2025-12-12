@@ -267,8 +267,11 @@ function App() {
   };
 
   const handleGenerateSummary = async () => {
-    const currentTranslation = translation.translations[selectedTargetLang];
-    if (!currentTranslation) return;
+    // Prefer the existing translation to generate the summary, as it might align better with user expectation
+    // If no translation exists, fallback to the original transcription. 
+    // The Gemini model will handle summarizing into the target language regardless of input language.
+    const sourceText = translation.translations[selectedTargetLang] || transcription.text;
+    if (!sourceText) return;
     
     // Check if we already have a summary for this language
     if (translation.summaries[selectedTargetLang]) return;
@@ -276,7 +279,7 @@ function App() {
     setTranslation(prev => ({ ...prev, isSummarizing: true, error: null }));
 
     try {
-      const summaryText = await generateSummary(currentTranslation, selectedTargetLang);
+      const summaryText = await generateSummary(sourceText, selectedTargetLang);
       const newSummaries = {
         ...translation.summaries,
         [selectedTargetLang]: summaryText
@@ -499,8 +502,8 @@ function App() {
                   </button>
                 </div>
 
-                {/* Bottom Row: View Switcher (Only show if translation exists) */}
-                {currentTranslation && (
+                {/* Bottom Row: View Switcher (Show if transcription exists) */}
+                {transcription.text && (
                    <div className="flex items-center gap-2 border-t border-slate-100 pt-4">
                      <button
                        onClick={() => setRightPanelMode('translation')}
@@ -546,7 +549,7 @@ function App() {
                         <FileText className="mb-4 h-12 w-12 text-slate-300" />
                         <h3 className="mb-2 text-lg font-semibold text-slate-900">Generate Summary</h3>
                         <p className="mb-6 max-w-xs text-sm text-slate-500">
-                          Create a structured summary and action items based on the {selectedTargetLang} translation.
+                          Create a structured summary and action items in {selectedTargetLang} based on the transcript or translation.
                         </p>
                         <button
                           onClick={handleGenerateSummary}
