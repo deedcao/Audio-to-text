@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
 import { Copy, CheckCircle2, Languages, Loader2 } from './Icons';
+import { ProgressBar } from './ProgressBar';
 
 interface ResultCardProps {
   title: string;
   content: string;
   isLoading?: boolean;
+  progress?: number;
   language?: string;
   placeholder?: string;
   variant?: 'primary' | 'secondary';
@@ -14,6 +16,7 @@ export const ResultCard: React.FC<ResultCardProps> = ({
   title, 
   content, 
   isLoading, 
+  progress = 0,
   language,
   placeholder = "Result will appear here...",
   variant = 'primary'
@@ -67,9 +70,16 @@ export const ResultCard: React.FC<ResultCardProps> = ({
 
       <div className="relative flex-1 p-6">
         {isLoading ? (
-          <div className="flex h-full w-full flex-col items-center justify-center gap-3 text-slate-400">
-            <Loader2 className="h-8 w-8 animate-spin text-indigo-500" />
-            <p className="text-sm animate-pulse">Processing content...</p>
+          <div className="flex h-full w-full flex-col items-center justify-center gap-6 text-slate-400 p-8">
+            <div className="relative">
+               <Loader2 className="h-10 w-10 animate-spin text-indigo-500" />
+               <div className="absolute inset-0 flex items-center justify-center">
+                 <div className="h-6 w-6 rounded-full bg-indigo-50/50 animate-pulse" />
+               </div>
+            </div>
+            <div className="w-full max-w-[240px]">
+              <ProgressBar progress={progress} label="Processing..." color={isPrimary ? "bg-indigo-600" : "bg-emerald-600"} />
+            </div>
           </div>
         ) : (
           <div className="h-full overflow-y-auto max-h-[400px]">

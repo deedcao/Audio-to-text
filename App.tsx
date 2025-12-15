@@ -7,6 +7,7 @@ import {
   ArchiveRecord
 } from './types';
 import { transcribeAudio, translateText, generateSummary } from './services/geminiService';
+import { processLargeAudioFile } from './services/audioUtils';
 import { 
   saveRecord, 
   getArchive, 
@@ -16,6 +17,7 @@ import {
 import { AudioUploader } from './components/AudioUploader';
 import { ResultCard } from './components/ResultCard';
 import { HistoryModal } from './components/HistoryModal';
+import { ProgressBar } from './components/ProgressBar';
 import { 
   PlayCircle, 
   PauseCircle, 
@@ -47,6 +49,7 @@ function App() {
   const [transcription, setTranscription] = useState<TranscriptionState>({
     text: '',
     isTranscribing: false,
+    progress: 0,
     error: null
   });
 
@@ -55,6 +58,7 @@ function App() {
     summaries: {},
     isTranslating: false,
     isSummarizing: false,
+    progress: 0,
     error: null
   });
 
@@ -63,8 +67,9 @@ function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   
-  // Refs for audio playback
+  // Refs
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const progressInterval = useRef<number | null>(null);
 
   // --- Persistence Helper ---
   const persistCurrentState = (
@@ -106,15 +111,40 @@ function App() {
     }
   };
 
+  // --- Helpers ---
+  
+  const startSimulatedProgress = (setFn: React.Dispatch<React.SetStateAction<any>>, max = 90) => {
+    if (progressInterval.current) clearInterval(progressInterval.current);
+    
+    setFn((prev: any) => ({ ...prev, progress: 0 }));
+    
+    progressInterval.current = window.setInterval(() => {
+      setFn((prev: any) => {
+        if (prev.progress >= max) return prev;
+        // Slow down as we get closer to 90%
+        const increment = Math.max(0.5, (max - prev.progress) / 20); 
+        return { ...prev, progress: Math.min(max, prev.progress + increment) };
+      });
+    }, 200);
+  };
+
+  const stopSimulatedProgress = () => {
+    if (progressInterval.current) {
+      clearInterval(progressInterval.current);
+      progressInterval.current = null;
+    }
+  };
+
   // --- Handlers ---
 
   const handleFileSelect = (file: File) => {
     // Reset states when new file is selected
-    setTranscription({ text: '', isTranscribing: false, error: null });
-    setTranslation({ translations: {}, summaries: {}, isTranslating: false, isSummarizing: false, error: null });
+    setTranscription({ text: '', isTranscribing: false, progress: 0, error: null });
+    setTranslation({ translations: {}, summaries: {}, isTranslating: false, isSummarizing: false, progress: 0, error: null });
     setActiveRecordId(null);
     setHistoryFileName(null);
     setRightPanelMode('translation');
+    stopSimulatedProgress();
     
     // Check archive for existing work
     const existingRecord = findRecordForFile(file);
@@ -123,6 +153,7 @@ function App() {
       setTranscription({
         text: existingRecord.transcription,
         isTranscribing: false,
+        progress: 100,
         error: null
       });
       setTranslation({
@@ -130,6 +161,7 @@ function App() {
         summaries: existingRecord.summaries || {},
         isTranslating: false,
         isSummarizing: false,
+        progress: 100,
         error: null
       });
       setActiveRecordId(existingRecord.id);
@@ -164,11 +196,12 @@ function App() {
 
   const handleRemoveFile = () => {
     setAudioState({ file: null, base64: null, mimeType: null, duration: null });
-    setTranscription({ text: '', isTranscribing: false, error: null });
-    setTranslation({ translations: {}, summaries: {}, isTranslating: false, isSummarizing: false, error: null });
+    setTranscription({ text: '', isTranscribing: false, progress: 0, error: null });
+    setTranslation({ translations: {}, summaries: {}, isTranslating: false, isSummarizing: false, progress: 0, error: null });
     setActiveRecordId(null);
     setHistoryFileName(null);
     setIsPlaying(false);
+    stopSimulatedProgress();
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
@@ -180,6 +213,7 @@ function App() {
     setTranscription({
       text: record.transcription,
       isTranscribing: false,
+      progress: 100,
       error: null
     });
     setTranslation({
@@ -187,6 +221,7 @@ function App() {
       summaries: record.summaries || {},
       isTranslating: false,
       isSummarizing: false,
+      progress: 100,
       error: null
     });
     setActiveRecordId(record.id);
@@ -213,19 +248,57 @@ function App() {
   };
 
   const handleTranscribe = async () => {
-    if (!audioState.base64 || !audioState.mimeType) return;
+    if (!audioState.file || !audioState.base64) return;
 
-    setTranscription(prev => ({ ...prev, isTranscribing: true, error: null }));
+    setTranscription(prev => ({ ...prev, isTranscribing: true, error: null, progress: 1 }));
+    
+    // LARGE FILE HANDLING STRATEGY
+    // The Gemini inline API limit is ~20MB.
+    // If file > 18MB, we use the client-side chunking strategy.
+    const isLargeFile = audioState.file.size > 18 * 1024 * 1024;
 
     try {
-      const text = await transcribeAudio(audioState.base64, audioState.mimeType);
-      setTranscription({ text, isTranscribing: false, error: null });
-      persistCurrentState(text, undefined, undefined);
+      let finalText = "";
+
+      if (isLargeFile) {
+        // --- CHUNKING PATH ---
+        setTranscription(prev => ({ ...prev, progress: 5 })); // 5% = processing start
+        
+        // 1. Process & Split (This can take a moment for large files)
+        const chunks = await processLargeAudioFile(audioState.file);
+        
+        // 2. Iterate and Transcribe
+        for (let i = 0; i < chunks.length; i++) {
+          const chunkBase64 = chunks[i];
+          const chunkProgress = 10 + Math.round((i / chunks.length) * 80);
+          setTranscription(prev => ({ ...prev, progress: chunkProgress }));
+
+          // For chunks, we ask for CONTINUATION if it's not the first one
+          const chunkText = await transcribeAudio(chunkBase64, 'audio/wav');
+          
+          if (finalText) {
+             finalText += "\n\n" + chunkText;
+          } else {
+             finalText = chunkText;
+          }
+        }
+      } else {
+        // --- STANDARD PATH ---
+        startSimulatedProgress(setTranscription, 90);
+        finalText = await transcribeAudio(audioState.base64, audioState.mimeType || 'audio/mp3');
+      }
+      
+      stopSimulatedProgress();
+      setTranscription({ text: finalText, isTranscribing: false, error: null, progress: 100 });
+      persistCurrentState(finalText, undefined, undefined);
+
     } catch (err: any) {
+      stopSimulatedProgress();
       console.error(err);
       setTranscription({ 
         text: '', 
         isTranscribing: false, 
+        progress: 0,
         error: err.message || 'An unexpected error occurred during transcription.' 
       });
     }
@@ -239,10 +312,17 @@ function App() {
 
     if (translation.translations[selectedTargetLang]) return;
 
-    setTranslation(prev => ({ ...prev, isTranslating: true, error: null }));
+    setTranslation(prev => ({ ...prev, isTranslating: true, error: null, progress: 0 }));
 
     try {
-      const translatedText = await translateText(transcription.text, selectedTargetLang);
+      const translatedText = await translateText(
+        transcription.text, 
+        selectedTargetLang, 
+        (percent) => {
+           setTranslation(prev => ({ ...prev, progress: percent }));
+        }
+      );
+      
       const newTranslations = {
         ...translation.translations,
         [selectedTargetLang]: translatedText
@@ -251,7 +331,8 @@ function App() {
       setTranslation(prev => ({
         ...prev,
         translations: newTranslations,
-        isTranslating: false
+        isTranslating: false,
+        progress: 100
       }));
 
       persistCurrentState(undefined, newTranslations, undefined);
@@ -261,19 +342,16 @@ function App() {
       setTranslation(prev => ({ 
         ...prev, 
         isTranslating: false, 
+        progress: 0,
         error: err.message || 'Translation failed.' 
       }));
     }
   };
 
   const handleGenerateSummary = async () => {
-    // Prefer the existing translation to generate the summary, as it might align better with user expectation
-    // If no translation exists, fallback to the original transcription. 
-    // The Gemini model will handle summarizing into the target language regardless of input language.
     const sourceText = translation.translations[selectedTargetLang] || transcription.text;
     if (!sourceText) return;
     
-    // Check if we already have a summary for this language
     if (translation.summaries[selectedTargetLang]) return;
 
     setTranslation(prev => ({ ...prev, isSummarizing: true, error: null }));
@@ -309,6 +387,7 @@ function App() {
       audioRef.current.src = URL.createObjectURL(audioState.file);
       audioRef.current.onended = () => setIsPlaying(false);
     }
+    return () => stopSimulatedProgress();
   }, [audioState.file]);
 
   // --- UI Components ---
@@ -415,7 +494,7 @@ function App() {
           )}
         </div>
 
-        {/* Action Area (Transcribe Button) */}
+        {/* Action Area (Transcribe Button or Progress) */}
         {audioState.file && !transcription.text && !transcription.isTranscribing && (
           <div className="flex justify-center mb-12">
             <button
@@ -426,6 +505,17 @@ function App() {
               <ArrowRight className="h-5 w-5 transition-transform group-hover:translate-x-1" />
             </button>
           </div>
+        )}
+        
+        {/* Active Transcription Progress (if happening outside of result card, e.g. starting) */}
+        {transcription.isTranscribing && !transcription.text && (
+           <div className="mx-auto max-w-md mb-12">
+             <ProgressBar 
+               progress={transcription.progress} 
+               label={audioState.file && audioState.file.size > 18 * 1024 * 1024 ? "Processing Large File (Decoding & Chunking)..." : "Transcribing Audio..."} 
+               color="bg-indigo-600" 
+             />
+           </div>
         )}
 
         {/* Restore Banner if loaded from history without file */}
@@ -461,6 +551,7 @@ function App() {
                   title="Transcription" 
                   content={transcription.text} 
                   isLoading={transcription.isTranscribing}
+                  progress={transcription.progress}
                   language="Original Audio"
                   placeholder="Transcription in progress..."
                 />
@@ -530,6 +621,7 @@ function App() {
                     title="Translation" 
                     content={translation.translations[selectedTargetLang] || ''} 
                     isLoading={translation.isTranslating}
+                    progress={translation.progress}
                     language={selectedTargetLang}
                     variant="secondary"
                     placeholder="Select a language and click Translate."

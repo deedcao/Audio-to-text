@@ -70,7 +70,7 @@ export const transcribeAudio = async (base64Audio: string, mimeType: string): Pr
               }
             },
             {
-              text: "Please provide a verbatim transcription of this audio file. Identify different speakers (e.g., Speaker 1, Speaker 2). Format the output as a clean dialogue script. **Start each speaker's turn on a new line and separate different speakers with an empty line to ensure clear structure.** Do not add any introductory or concluding remarks, just the transcription text. If the audio is silent or unintelligible, simply state '[Inaudible]'."
+              text: "Please provide a verbatim transcription of this audio segment. Identify different speakers (e.g., Speaker 1, Speaker 2) if possible. Format the output as a clean dialogue script. Start each speaker's turn on a new line and separate different speakers with an empty line. Do not add any introductory or concluding remarks (like 'Here is the transcript'), just the transcription text. If the audio is silent or unintelligible, state '[Inaudible]'."
             }
           ]
         }
@@ -79,9 +79,8 @@ export const transcribeAudio = async (base64Audio: string, mimeType: string): Pr
       return response.text || "";
     } catch (error: any) {
       console.error("Transcription error:", error);
-      // Improve error messages for common issues
       if (error.message?.includes("Rpc failed") || error.toString().includes("500")) {
-        throw new Error("Network error during upload. The file is likely too large (browser XHR limit). Please try a smaller file (under 20MB) or split the audio.");
+        throw new Error("Network error during processing. The audio segment might still be too large.");
       }
       throw new Error("Failed to transcribe audio. Please ensure the file is valid and try again.");
     }
@@ -93,10 +92,16 @@ export const transcribeAudio = async (base64Audio: string, mimeType: string): Pr
  * Handles large texts by chunking them to avoid XHR limits.
  * @param text The source text to translate.
  * @param targetLanguage The target language enum value.
+ * @param onProgress Optional callback for progress updates (0-100).
  */
-export const translateText = async (text: string, targetLanguage: SupportedLanguage): Promise<string> => {
+export const translateText = async (
+  text: string, 
+  targetLanguage: SupportedLanguage,
+  onProgress?: (percent: number) => void
+): Promise<string> => {
   // If text is small enough, send it in one go
   if (text.length < 6000) {
+    if (onProgress) onProgress(10); // Start
     return retryOperation(async () => {
       try {
         const prompt = `Translate the following transcript into ${targetLanguage}. 
@@ -113,6 +118,7 @@ export const translateText = async (text: string, targetLanguage: SupportedLangu
           contents: prompt
         });
 
+        if (onProgress) onProgress(100);
         return response.text || "";
       } catch (error: any) {
         console.error("Translation error:", error);
@@ -125,9 +131,11 @@ export const translateText = async (text: string, targetLanguage: SupportedLangu
   }
 
   // If text is large, use chunking strategy
-  const chunks = splitTextIntoChunks(text, 6000);
+  const chunks = splitTextIntoChunks(text, 6000); // Reduce chunk size slightly to be safe
   const translatedChunks: string[] = [];
   
+  if (onProgress) onProgress(0);
+
   // Process chunks sequentially to maintain order and stability
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
@@ -150,6 +158,12 @@ export const translateText = async (text: string, targetLanguage: SupportedLangu
       });
       
       translatedChunks.push(chunkTranslation);
+      
+      if (onProgress) {
+        const percent = Math.round(((i + 1) / chunks.length) * 100);
+        onProgress(percent);
+      }
+
     } catch (error) {
       console.error(`Failed to translate chunk ${i + 1}/${chunks.length}`, error);
       throw new Error(`Failed to translate part of the text (segment ${i + 1}).`);

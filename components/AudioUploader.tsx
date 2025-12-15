@@ -50,11 +50,14 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({ onFileSelect, disa
     // Check extension primarily as MIME type detection in browser can be spotty for m4a
     const isValidExtension = ext && validExtensions.includes(ext);
 
-    if (isValidExtension) {
-      onFileSelect(file);
-    } else {
+    if (!isValidExtension) {
       alert("Please upload a valid MP3, WAV, or M4A file.");
+      return;
     }
+
+    // Size limit check removed as requested
+    
+    onFileSelect(file);
   };
 
   return (
