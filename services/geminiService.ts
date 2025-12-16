@@ -61,6 +61,15 @@ export const transcribeAudio = async (base64Audio: string, mimeType: string): Pr
     try {
       const response = await ai.models.generateContent({
         model: MODEL_NAME,
+        config: {
+          systemInstruction: `You are an expert transcriber.
+Rules:
+1. Provide a verbatim transcription.
+2. Identify speakers (e.g., Speaker 1, Speaker 2) and separate turns with an empty line.
+3. CRITICAL: If the detected language is CHINESE, you MUST output SIMPLIFIED CHINESE (简体中文) characters only. Do NOT use Traditional Chinese, even if the audio is Cantonese or from a region that uses Traditional Chinese.
+4. Do not add conversational filler or introductory text.
+5. If inaudible, use [Inaudible].`
+        },
         contents: {
           parts: [
             {
@@ -70,7 +79,7 @@ export const transcribeAudio = async (base64Audio: string, mimeType: string): Pr
               }
             },
             {
-              text: "Please provide a verbatim transcription of this audio segment. Identify different speakers (e.g., Speaker 1, Speaker 2) if possible. Format the output as a clean dialogue script. Start each speaker's turn on a new line and separate different speakers with an empty line. Do not add any introductory or concluding remarks (like 'Here is the transcript'), just the transcription text. If the audio is silent or unintelligible, state '[Inaudible]'."
+              text: "Transcribe this audio. Note: Output Simplified Chinese for any Chinese speech."
             }
           ]
         }
