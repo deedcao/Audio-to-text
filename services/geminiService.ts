@@ -3,24 +3,41 @@ import { SupportedLanguage } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-const MODEL_NAME = 'gemini-2.5-flash';
+// Using gemini-3-flash-preview for better instruction following in text tasks
+const MODEL_NAME = 'gemini-3-flash-preview';
 
 /**
- * Helper to retry operations on transient failures (network, 5xx).
+ * Helper to retry operations on transient failures (network, 5xx) and rate limits (429).
  */
-async function retryOperation<T>(operation: () => Promise<T>, retries = 3, delay = 1000): Promise<T> {
+async function retryOperation<T>(operation: () => Promise<T>, retries = 5, delay = 2000): Promise<T> {
   try {
     return await operation();
   } catch (error: any) {
-    const isNetworkError = error.message?.includes("Rpc failed") || 
-                           error.message?.includes("xhr error") || 
-                           error.toString().includes("500") ||
-                           error.toString().includes("503");
+    let errString = '';
+    try {
+      errString = JSON.stringify(error);
+    } catch {
+      errString = error.toString();
+    }
+    
+    const message = error.message || '';
+    const fullErrorText = (message + ' ' + errString).toLowerCase();
+    
+    const isRateLimit = fullErrorText.includes("429") || 
+                        fullErrorText.includes("quota") || 
+                        fullErrorText.includes("resource_exhausted");
+
+    const isNetworkError = fullErrorText.includes("rpc failed") || 
+                           fullErrorText.includes("xhr error") || 
+                           fullErrorText.includes("fetch failed") || 
+                           fullErrorText.includes("500") ||
+                           fullErrorText.includes("503");
                            
-    if (retries > 0 && isNetworkError) {
-      console.warn(`Operation failed, retrying... (${retries} attempts left)`);
-      await new Promise(resolve => setTimeout(resolve, delay));
-      return retryOperation(operation, retries - 1, delay * 2);
+    if (retries > 0 && (isNetworkError || isRateLimit)) {
+      const waitTime = isRateLimit ? Math.max(delay, 15000) : delay;
+      console.warn(`Operation failed (${isRateLimit ? 'Rate Limit' : 'Network'}), retrying in ${waitTime}ms...`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+      return retryOperation(operation, retries - 1, waitTime * 2);
     }
     throw error;
   }
@@ -28,24 +45,22 @@ async function retryOperation<T>(operation: () => Promise<T>, retries = 3, delay
 
 /**
  * Splits text into manageable chunks for API processing.
- * Preserves sentence/line integrity where possible.
  */
-function splitTextIntoChunks(text: string, limit: number = 6000): string[] {
+function splitTextIntoChunks(text: string, limit: number = 4000): string[] {
   const chunks: string[] = [];
   let currentChunk = '';
   const lines = text.split('\n');
 
   for (const line of lines) {
-    // If adding this line exceeds limit, push current chunk and start new
     if (currentChunk.length > 0 && currentChunk.length + line.length > limit) {
-      chunks.push(currentChunk);
+      chunks.push(currentChunk.trim());
       currentChunk = '';
     }
     currentChunk += line + '\n';
   }
   
   if (currentChunk.trim().length > 0) {
-    chunks.push(currentChunk);
+    chunks.push(currentChunk.trim());
   }
   
   return chunks;
@@ -53,154 +68,103 @@ function splitTextIntoChunks(text: string, limit: number = 6000): string[] {
 
 /**
  * Transcribes audio content using Gemini.
- * @param base64Audio The base64 string of the audio (without data prefix).
- * @param mimeType The mime type of the audio file.
  */
 export const transcribeAudio = async (base64Audio: string, mimeType: string): Promise<string> => {
   return retryOperation(async () => {
-    try {
-      const response = await ai.models.generateContent({
-        model: MODEL_NAME,
-        config: {
-          systemInstruction: `You are an expert transcriber.
-Rules:
-1. Provide a verbatim transcription.
-2. Identify speakers (e.g., Speaker 1, Speaker 2) and separate turns with an empty line.
-3. CRITICAL: If the detected language is CHINESE, you MUST output SIMPLIFIED CHINESE (简体中文) characters only. Do NOT use Traditional Chinese, even if the audio is Cantonese or from a region that uses Traditional Chinese.
-4. Do not add conversational filler or introductory text.
-5. If inaudible, use [Inaudible].`
-        },
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType: mimeType,
-                data: base64Audio
-              }
-            },
-            {
-              text: "Transcribe this audio. Note: Output Simplified Chinese for any Chinese speech."
-            }
-          ]
-        }
-      });
-
-      return response.text || "";
-    } catch (error: any) {
-      console.error("Transcription error:", error);
-      if (error.message?.includes("Rpc failed") || error.toString().includes("500")) {
-        throw new Error("Network error during processing. The audio segment might still be too large.");
+    const response = await ai.models.generateContent({
+      model: MODEL_NAME,
+      config: {
+        systemInstruction: `You are a professional stenographer.
+        Task: Transcribe the audio accurately.
+        Rules:
+        1. Identify speakers (e.g., Speaker 1, Speaker 2).
+        2. If Chinese is detected, output ONLY Simplified Chinese (简体中文).
+        3. Maintain verbatim accuracy.
+        4. Format with clear paragraphs and line breaks between speakers.`
+      },
+      contents: {
+        parts: [
+          { inlineData: { mimeType, data: base64Audio } },
+          { text: "Transcribe this audio. Ensure all Chinese output is in Simplified Chinese." }
+        ]
       }
-      throw new Error("Failed to transcribe audio. Please ensure the file is valid and try again.");
-    }
+    });
+    return response.text || "";
   });
 };
 
 /**
- * Translates text into a target language.
- * Handles large texts by chunking them to avoid XHR limits.
- * @param text The source text to translate.
- * @param targetLanguage The target language enum value.
- * @param onProgress Optional callback for progress updates (0-100).
+ * Ensures text style consistency (Simplified Chinese focus).
+ */
+export const unifyTranscriptStyle = async (text: string, onProgress?: (percent: number) => void): Promise<string> => {
+  if (onProgress) onProgress(0);
+  const hasChinese = /[\u4e00-\u9fa5]/.test(text);
+  if (!hasChinese) {
+    if (onProgress) onProgress(100);
+    return text;
+  }
+
+  const TRADITIONAL_INDICATORS = ['這', '個', '們', '來', '對', '時', '說', '會', '為', '國', '學', '後', '實', '體', '業'];
+  const hasTraditional = TRADITIONAL_INDICATORS.some(char => text.includes(char));
+
+  if (!hasTraditional) {
+    if (onProgress) onProgress(100);
+    return text;
+  }
+
+  const chunks = splitTextIntoChunks(text, 5000);
+  const processedChunks: string[] = [];
+
+  for (let i = 0; i < chunks.length; i++) {
+    const res = await retryOperation(async () => {
+      const response = await ai.models.generateContent({
+        model: MODEL_NAME,
+        contents: `Task: Convert all Traditional Chinese characters to Simplified Chinese. 
+        Keep formatting, speaker labels, and non-Chinese text exactly as is.
+        
+        Text:
+        ${chunks[i]}`
+      });
+      return response.text || chunks[i];
+    });
+    processedChunks.push(res);
+    if (onProgress) onProgress(Math.round(((i + 1) / chunks.length) * 100));
+  }
+  return processedChunks.join('\n\n');
+};
+
+/**
+ * Translates text with high-intensity completeness instructions.
  */
 export const translateText = async (
   text: string, 
   targetLanguage: SupportedLanguage,
   onProgress?: (percent: number) => void
 ): Promise<string> => {
-  // If text is small enough, send it in one go
-  if (text.length < 6000) {
-    if (onProgress) onProgress(10); // Start
-    return retryOperation(async () => {
-      try {
-        const prompt = `Translate the following transcript into ${targetLanguage}. 
-        Strictly maintain the original formatting, including line breaks and speaker labels (e.g., Speaker 1:, Speaker 2:).
-        Ensure that different speakers remain separated by empty lines, just like the original text.
-        Ensure the tone and nuance of the original text are preserved. 
-        Do not add notes or explanations.
-        
-        Text to translate:
-        "${text}"`;
-
-        const response = await ai.models.generateContent({
-          model: MODEL_NAME,
-          contents: prompt
-        });
-
-        if (onProgress) onProgress(100);
-        return response.text || "";
-      } catch (error: any) {
-        console.error("Translation error:", error);
-        if (error.message?.includes("Rpc failed") || error.toString().includes("500")) {
-           throw new Error("Network error during translation. The text might be too long.");
-        }
-        throw new Error(`Failed to translate text to ${targetLanguage}.`);
-      }
-    });
-  }
-
-  // If text is large, use chunking strategy
-  const chunks = splitTextIntoChunks(text, 6000); // Reduce chunk size slightly to be safe
+  const chunks = splitTextIntoChunks(text, 4000); // Smaller chunks for higher precision
   const translatedChunks: string[] = [];
   
   if (onProgress) onProgress(0);
 
-  // Process chunks sequentially to maintain order and stability
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
-    try {
-      const chunkTranslation = await retryOperation(async () => {
-        const prompt = `Translate the following transcript segment into ${targetLanguage}. 
-        Strictly maintain the original formatting, including line breaks and speaker labels.
-        Ensure that different speakers remain separated by empty lines.
-        Do not add notes or explanations.
-        
-        Text to translate:
-        "${chunk}"`;
-
-        const response = await ai.models.generateContent({
-          model: MODEL_NAME,
-          contents: prompt
-        });
-
-        return response.text || "";
-      });
+    const chunkTranslation = await retryOperation(async () => {
+      const prompt = `Task: Translate the following text COMPLETELY into ${targetLanguage}.
       
-      translatedChunks.push(chunkTranslation);
+      CRITICAL INSTRUCTIONS:
+      1. TRANSLATE 100% of the content. Do NOT leave any words, phrases, or sentences in the original language.
+      2. No "lazy translation": Ensure every single line is converted to ${targetLanguage}.
+      3. Speaker labels: Translate "Speaker" to the equivalent in ${targetLanguage} (e.g., "发言人" for Chinese).
+      4. Formatting: Maintain the exact paragraph structure and line breaks.
+      5. Tone: Preserve the original speaker's tone and intent.
+      6. Verbatim: Do not summarize or omit anything.
       
-      if (onProgress) {
-        const percent = Math.round(((i + 1) / chunks.length) * 100);
-        onProgress(percent);
-      }
-
-    } catch (error) {
-      console.error(`Failed to translate chunk ${i + 1}/${chunks.length}`, error);
-      throw new Error(`Failed to translate part of the text (segment ${i + 1}).`);
-    }
-  }
-
-  return translatedChunks.join('\n');
-};
-
-/**
- * Generates a structured summary (Meeting Minutes) from the text.
- * @param text The text to summarize (usually the translated text).
- * @param language The language to generate the summary in.
- */
-export const generateSummary = async (text: string, language: SupportedLanguage): Promise<string> => {
-  return retryOperation(async () => {
-    try {
-      const prompt = `Please provide a structured summary (Meeting Minutes) of the following text in ${language}.
+      Original Text Segment:
+      """
+      ${chunk}
+      """
       
-      Structure the output with the following sections (use appropriate headers in ${language}):
-      1. **Overview/Topic**: A brief 1-2 sentence summary of what was discussed.
-      2. **Key Points**: Bullet points of the main arguments or topics.
-      3. **Action Items / Conclusions**: If any actions, decisions, or next steps were mentioned.
-      
-      Keep it professional, concise, and easy to read.
-      
-      Text to summarize:
-      "${text.substring(0, 15000)}"`; // Limit context for summary to avoid huge payloads if text is massive
+      Translated Text in ${targetLanguage}:`;
 
       const response = await ai.models.generateContent({
         model: MODEL_NAME,
@@ -208,9 +172,34 @@ export const generateSummary = async (text: string, language: SupportedLanguage)
       });
 
       return response.text || "";
-    } catch (error: any) {
-      console.error("Summary error:", error);
-      throw new Error("Failed to generate summary.");
-    }
+    });
+    
+    translatedChunks.push(chunkTranslation);
+    if (onProgress) onProgress(Math.round(((i + 1) / chunks.length) * 100));
+  }
+
+  return translatedChunks.join('\n\n');
+};
+
+/**
+ * Generates meeting minutes/summary.
+ */
+export const generateSummary = async (text: string, language: SupportedLanguage): Promise<string> => {
+  return retryOperation(async () => {
+    const prompt = `Task: Create structured Meeting Minutes in ${language} based on the provided text.
+    
+    Required Sections:
+    1. **Overview**: General topic and context.
+    2. **Key Points**: Critical information discussed.
+    3. **Action Items**: Decisions made or future tasks.
+    
+    Text:
+    "${text.substring(0, 15000)}"`;
+
+    const response = await ai.models.generateContent({
+      model: MODEL_NAME,
+      contents: prompt
+    });
+    return response.text || "";
   });
 };

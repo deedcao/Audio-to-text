@@ -94,9 +94,10 @@ export const processLargeAudioFile = async (file: File): Promise<string[]> => {
     const pcmData = await resampleAndMixDown(audioBuffer);
 
     // 3. Chunk it
-    // 5 minutes per chunk = 300 seconds
+    // Increased to 5 minutes (300 seconds) to optimize speed.
     // 300 * 16000 samples = 4,800,000 samples
-    // 4,800,000 * 2 bytes = ~9.6 MB per chunk (Safe for API)
+    // 4,800,000 * 2 bytes = ~9.6 MB raw PCM -> ~12.8 MB Base64
+    // This fits safely within the 20MB Gemini API limit while reducing total request count.
     const SAMPLES_PER_CHUNK = 300 * SAMPLE_RATE; 
     const chunks: string[] = [];
 

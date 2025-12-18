@@ -3,10 +3,10 @@ import {
   SupportedLanguage, 
   AudioFileState, 
   TranscriptionState, 
-  TranslationState,
+  TranslationState, 
   ArchiveRecord
 } from './types';
-import { transcribeAudio, translateText, generateSummary } from './services/geminiService';
+import { transcribeAudio, translateText, generateSummary, unifyTranscriptStyle } from './services/geminiService';
 import { processLargeAudioFile } from './services/audioUtils';
 import { 
   saveRecord, 
@@ -23,11 +23,11 @@ import {
   PauseCircle, 
   X, 
   Languages, 
-  ArrowRight,
-  FileAudio,
-  History,
-  Archive,
-  FileText,
+  ArrowRight, 
+  FileAudio, 
+  History, 
+  Archive, 
+  FileText, 
   ListTodo
 } from './components/Icons';
 
@@ -267,27 +267,75 @@ function App() {
         // 1. Process & Split (This can take a moment for large files)
         const chunks = await processLargeAudioFile(audioState.file);
         
-        // 2. Iterate and Transcribe
-        for (let i = 0; i < chunks.length; i++) {
-          const chunkBase64 = chunks[i];
-          const chunkProgress = 10 + Math.round((i / chunks.length) * 80);
-          setTranscription(prev => ({ ...prev, progress: chunkProgress }));
+        // 2. Serial Processing
+        // We use STRICT SERIAL PROCESSING (Concurrency 1) to avoid 429 Resource Exhausted errors.
+        const CONCURRENCY = 1; 
+        const chunkResults: string[] = new Array(chunks.length).fill("");
+        let completedChunks = 0;
 
-          // For chunks, we ask for CONTINUATION if it's not the first one
-          const chunkText = await transcribeAudio(chunkBase64, 'audio/wav');
-          
-          if (finalText) {
-             finalText += "\n\n" + chunkText;
-          } else {
-             finalText = chunkText;
+        // Create a queue of chunk indices to process
+        const queue = chunks.map((_, i) => i);
+
+        // Worker function that picks items from queue
+        const worker = async () => {
+          while (queue.length > 0) {
+            const index = queue.shift();
+            if (index === undefined) break;
+
+            try {
+              // We use the retry logic embedded in transcribeAudio for stability
+              const text = await transcribeAudio(chunks[index], 'audio/wav');
+              chunkResults[index] = text;
+              
+              // Minimized breather between chunks for speed (200ms)
+              await new Promise(r => setTimeout(r, 200));
+            } catch (err: any) {
+              console.error(`Chunk ${index} failed`, err);
+              chunkResults[index] = `[Transcription Error for Segment ${index + 1}]`;
+
+              // CRITICAL: If failure was due to rate limit/quota, we pause.
+              // Reduced to 20s as we are sending fewer requests now.
+              const isQuotaError = err.message?.includes('429') || 
+                                   err.message?.includes('quota') || 
+                                   err.message?.includes('RESOURCE_EXHAUSTED');
+              
+              if (isQuotaError) {
+                console.warn("Quota limit hit in loop. Pausing for 20 seconds...");
+                await new Promise(r => setTimeout(r, 20000));
+              }
+            } finally {
+              completedChunks++;
+              // Progress tracking: mapped to 10% -> 90% range
+              const currentProgress = 10 + Math.round((completedChunks / chunks.length) * 80);
+              setTranscription(prev => ({ ...prev, progress: currentProgress }));
+            }
           }
-        }
+        };
+
+        // Start workers
+        const workers = Array(Math.min(chunks.length, CONCURRENCY))
+          .fill(null)
+          .map(() => worker());
+        
+        await Promise.all(workers);
+        
+        finalText = chunkResults.join("\n\n");
       } else {
         // --- STANDARD PATH ---
         startSimulatedProgress(setTranscription, 90);
         finalText = await transcribeAudio(audioState.base64, audioState.mimeType || 'audio/mp3');
       }
       
+      // --- FINAL UNIFICATION STEP ---
+      // Fix mixed Traditional/Simplified Chinese by running a text-only pass
+      setTranscription(prev => ({ ...prev, progress: 95 }));
+      
+      // Updated to use callback for 95-99% progress
+      finalText = await unifyTranscriptStyle(finalText, (percent) => {
+         const mappedProgress = 95 + Math.floor((percent / 100) * 4);
+         setTranscription(prev => ({ ...prev, progress: mappedProgress }));
+      });
+
       stopSimulatedProgress();
       setTranscription({ text: finalText, isTranscribing: false, error: null, progress: 100 });
       persistCurrentState(finalText, undefined, undefined);
