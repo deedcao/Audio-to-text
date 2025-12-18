@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { 
   UploadCloud, 
@@ -16,7 +17,10 @@ import {
   Archive,
   Clock,
   FileText,
-  ListTodo
+  ListTodo,
+  Mic,
+  MicOff,
+  Square
 } from 'lucide-react';
 
 export { 
@@ -27,14 +31,17 @@ export {
   ArrowRight, 
   CheckCircle2, 
   Loader2, 
-  Copy,
-  Download,
-  PlayCircle,
-  PauseCircle,
-  History,
-  Trash2,
-  Archive,
-  Clock,
-  FileText,
-  ListTodo
+  Copy, 
+  Download, 
+  PlayCircle, 
+  PauseCircle, 
+  History, 
+  Trash2, 
+  Archive, 
+  Clock, 
+  FileText, 
+  ListTodo,
+  Mic,
+  MicOff,
+  Square
 };

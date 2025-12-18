@@ -1,3 +1,4 @@
+
 export enum SupportedLanguage {
   ENGLISH = 'English',
   CHINESE_SIMPLIFIED = 'Chinese (Simplified)',
@@ -27,6 +28,7 @@ export interface AudioFileState {
 export interface TranscriptionState {
   text: string;
   isTranscribing: boolean;
+  isRecording: boolean;
   progress: number; // 0-100
   error: string | null;
 }
@@ -40,11 +42,6 @@ export interface TranslationState {
   error: string | null;
 }
 
-export interface ProcessStatus {
-  step: 'upload' | 'transcribing' | 'ready' | 'translating';
-  message?: string;
-}
-
 export interface ArchiveRecord {
   id: string;
   fileName: string;
@@ -55,4 +52,5 @@ export interface ArchiveRecord {
   translations: Record<string, string>;
   summaries?: Record<string, string>;
   createdAt: number;
+  isLiveRecording?: boolean;
 }
