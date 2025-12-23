@@ -1,111 +1,54 @@
-import { GoogleGenAI, Modality, LiveServerMessage } from "@google/genai";
+
+import { GoogleGenAI } from "@google/genai";
 import { SupportedLanguage } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// Helper to get a fresh AI instance with the current process.env.API_KEY
+const getAI = () => new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-const MODEL_NAME = 'gemini-3-flash-preview';
-const LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-09-2025';
+const MODEL_PRO = 'gemini-3-pro-preview';
+const MODEL_FLASH = 'gemini-3-flash-preview';
 
-/**
- * Base64 Encoding Helper
- */
-export function encode(bytes: Uint8Array) {
-  let binary = '';
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
-/**
- * Helper to retry operations on transient failures.
- */
-async function retryOperation<T>(operation: () => Promise<T>, retries = 5, delay = 2000): Promise<T> {
+async function retryOperation<T>(operation: () => Promise<T>, retries = 3, delay = 2000): Promise<T> {
   try {
     return await operation();
   } catch (error: any) {
-    let errString = error.toString();
-    const fullErrorText = errString.toLowerCase();
-    
-    const isRateLimit = fullErrorText.includes("429") || fullErrorText.includes("quota");
-    const isNetworkError = fullErrorText.includes("rpc failed") || fullErrorText.includes("fetch failed") || fullErrorText.includes("500");
-                           
-    if (retries > 0 && (isNetworkError || isRateLimit)) {
-      const waitTime = isRateLimit ? Math.max(delay, 15000) : delay;
-      await new Promise(resolve => setTimeout(resolve, waitTime));
-      return retryOperation(operation, retries - 1, waitTime * 2);
+    const errString = error.toString().toLowerCase();
+    if (errString.includes("429") || errString.includes("quota")) {
+       throw new Error("QUOTA_EXHAUSTED");
+    }
+    if (retries > 0 && (errString.includes("500") || errString.includes("timeout") || errString.includes("deadline"))) {
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return retryOperation(operation, retries - 1, delay * 2);
     }
     throw error;
   }
 }
 
-function splitTextIntoChunks(text: string, limit: number = 4000): string[] {
-  const chunks: string[] = [];
-  let currentChunk = '';
-  const lines = text.split('\n');
-  for (const line of lines) {
-    if (currentChunk.length > 0 && currentChunk.length + line.length > limit) {
-      chunks.push(currentChunk.trim());
-      currentChunk = '';
-    }
-    currentChunk += line + '\n';
-  }
-  if (currentChunk.trim().length > 0) chunks.push(currentChunk.trim());
-  return chunks;
-}
-
 /**
- * Setup a Live API session for continuous transcription with speaker distinction.
+ * High-precision verbatim transcription.
+ * Strictly enforces Simplified Chinese for any detected Chinese dialects.
  */
-export const startLiveTranscription = (callbacks: {
-  onTranscript: (text: string) => void;
-  onTurnComplete: () => void;
-  onError: (error: any) => void;
-  onClose: () => void;
-}) => {
-  const sessionPromise = ai.live.connect({
-    model: LIVE_MODEL,
-    callbacks: {
-      onopen: () => console.log("Live session opened"),
-      onmessage: async (message: LiveServerMessage) => {
-        if (message.serverContent?.outputTranscription) {
-          const text = message.serverContent.outputTranscription.text;
-          if (text) callbacks.onTranscript(text);
-        }
-
-        if (message.serverContent?.turnComplete) {
-          callbacks.onTurnComplete();
-        }
-      },
-      onerror: (e) => callbacks.onError(e),
-      onclose: (e) => callbacks.onClose(),
-    },
-    config: {
-      responseModalities: [Modality.AUDIO],
-      inputAudioTranscription: {},
-      outputAudioTranscription: {}, 
-      systemInstruction: "You are a professional verbatim meeting transcriber. 1. Transcribe the audio EXACTLY in the language it is spoken. 2. DO NOT translate the content into any other language. 3. DO NOT identify real names. Use generic labels like 'Speaker A:', 'Speaker B:', etc. 4. If Chinese is spoken, output Simplified Chinese. 5. Maintain clear paragraph breaks.",
-    },
-  });
-
-  return sessionPromise;
-};
-
-/**
- * Transcribe full audio file with generic speaker labels and strict source language preservation.
- */
-export const transcribeAudio = async (base64Audio: string, mimeType: string): Promise<string> => {
+export const transcribeAudio = async (base64Audio: string, mimeType: string, isChunk: boolean = true): Promise<string> => {
   return retryOperation(async () => {
+    const ai = getAI();
     const response = await ai.models.generateContent({
-      model: MODEL_NAME,
+      model: MODEL_FLASH,
       config: {
-        systemInstruction: `You are a professional verbatim stenographer. 1. Transcribe the audio exactly in its original language. 2. CRITICAL: DO NOT translate the speech. If the speaker speaks English, write English. If they speak Chinese, write Chinese. 3. Use generic speaker labels like 'Speaker A:', 'Speaker B:'. 4. DO NOT attempt to identify or guess real names. 5. If Chinese is detected, use Simplified Chinese.`
+        systemInstruction: `You are a world-class professional transcriptionist. 
+Your goal is to provide a strictly VERBATIM (word-for-word) transcript.
+
+CRITICAL RULES:
+1. Transcribe EXACTLY what is said. DO NOT summarize or paraphrase.
+2. CHINESE LANGUAGE RULE: If the audio is in ANY Chinese dialect (Mandarin, Cantonese, etc.), you MUST output ONLY Simplified Chinese (简体中文). NEVER use Traditional characters.
+3. If the audio is in English, use standard English.
+4. Maintain the original language in this step. DO NOT translate yet.
+5. Identify speakers as "SPEAKER 1:", "SPEAKER 2:", etc.
+6. Output ONLY the transcript text.`
       },
       contents: {
         parts: [
-          { inlineData: { mimeType, data: base64Audio } },
-          { text: "Verbatim transcription in original language only." }
+          { inlineData: { mimeType, data: base64Audio } }, 
+          { text: `Transcribe this audio verbatim. If Chinese is detected, use Simplified Chinese characters only.` }
         ]
       }
     });
@@ -114,51 +57,55 @@ export const transcribeAudio = async (base64Audio: string, mimeType: string): Pr
 };
 
 /**
- * Ensure the final transcript adheres to simplified Chinese and clean labels without translating.
+ * Merges chunks and fixes boundary issues without losing data.
  */
-export const unifyTranscriptStyle = async (text: string, onProgress?: (percent: number) => void): Promise<string> => {
-  if (onProgress) onProgress(0);
-  const chunks = splitTextIntoChunks(text, 5000);
-  const processedChunks: string[] = [];
-  for (let i = 0; i < chunks.length; i++) {
-    const res = await retryOperation(async () => {
-      const response = await ai.models.generateContent({
-        model: MODEL_NAME,
-        contents: `Please refine the formatting of this transcript. 1. KEEP the original language. DO NOT TRANSLATE. 2. Ensure speaker labels are consistently formatted as 'Speaker X:'. 3. Ensure any Chinese content is Simplified Chinese. 4. Remove any accidentally identified real names and replace them with 'Speaker X'. Text:\n${chunks[i]}`
-      });
-      return response.text || chunks[i];
+export const unifyTranscriptStyle = async (text: string): Promise<string> => {
+  if (text.length < 50) return text;
+
+  return retryOperation(async () => {
+    const ai = getAI();
+    const response = await ai.models.generateContent({
+      model: MODEL_FLASH, 
+      config: {
+        systemInstruction: `You are a transcript editor. Merge multiple chunks into a cohesive document.
+1. Fix split sentences at chunk boundaries.
+2. Keep speaker labels consistent.
+3. DO NOT SUMMARIZE. DO NOT REMOVE CONTENT.
+4. MANDATORY: All Chinese text must be Simplified Chinese (简体中文).`
+      },
+      contents: `Polish and merge this transcript while maintaining its verbatim nature and using Simplified Chinese:\n\n${text}`
     });
-    processedChunks.push(res);
-    if (onProgress) onProgress(Math.round(((i + 1) / chunks.length) * 100));
-  }
-  return processedChunks.join('\n\n');
+    return response.text || text;
+  });
 };
 
-/**
- * Translate text while maintaining generic speaker labels.
- */
-export const translateText = async (text: string, targetLanguage: SupportedLanguage, onProgress?: (percent: number) => void): Promise<string> => {
-  const chunks = splitTextIntoChunks(text, 4000);
-  const translatedChunks: string[] = [];
-  if (onProgress) onProgress(0);
-  for (let i = 0; i < chunks.length; i++) {
-    const chunkTranslation = await retryOperation(async () => {
-      const response = await ai.models.generateContent({
-        model: MODEL_NAME,
-        contents: `Translate the following meeting transcript into ${targetLanguage}. 1. Maintain generic speaker labels like 'Speaker A:', 'Speaker B:'. DO NOT replace them with names. 2. Translate the labels themselves if appropriate (e.g., 'Speaker A' becomes '发言人 A' in Chinese). 3. Preserve the tone and verbatim meaning. Fragment:\n${chunks[i]}`
-      });
-      return response.text || "";
+export const translateText = async (text: string, targetLanguage: SupportedLanguage, onProgress?: (p: number) => void): Promise<string> => {
+  return retryOperation(async () => {
+    const ai = getAI();
+    const isSimplifiedTarget = targetLanguage === SupportedLanguage.CHINESE_SIMPLIFIED;
+    
+    const response = await ai.models.generateContent({
+      model: MODEL_PRO,
+      contents: `Translate the following transcript into ${targetLanguage}. 
+- Keep "SPEAKER X:" labels exactly as they are.
+- Translate accurately without skipping content.
+${isSimplifiedTarget ? '- Use Simplified Chinese (简体中文) ONLY. No traditional characters.' : ''}\n\n${text}`
     });
-    translatedChunks.push(chunkTranslation);
-    if (onProgress) onProgress(Math.round(((i + 1) / chunks.length) * 100));
-  }
-  return translatedChunks.join('\n\n');
+    if (onProgress) onProgress(100);
+    return response.text || "";
+  });
 };
 
 export const generateSummary = async (text: string, language: SupportedLanguage): Promise<string> => {
   return retryOperation(async () => {
-    const prompt = `Generate a structured meeting summary in ${language} based on the transcript provided. Use generic references like 'Speaker A' or 'Speaker B'. DO NOT include real names. Include: Overview, Key Discussion Points, and Action Items. Text:\n"${text.substring(0, 15000)}"`;
-    const response = await ai.models.generateContent({ model: MODEL_NAME, contents: prompt });
+    const ai = getAI();
+    const isSimplifiedTarget = language === SupportedLanguage.CHINESE_SIMPLIFIED;
+    
+    const response = await ai.models.generateContent({
+      model: MODEL_PRO,
+      contents: `Generate a detailed professional summary and key takeaways in ${language}.
+${isSimplifiedTarget ? '- Use Simplified Chinese (简体中文) ONLY.' : ''}\n\n${text}`
+    });
     return response.text || "";
   });
 };

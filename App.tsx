@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   SupportedLanguage, 
   AudioFileState, 
@@ -10,9 +10,7 @@ import {
   transcribeAudio, 
   translateText, 
   generateSummary, 
-  unifyTranscriptStyle,
-  startLiveTranscription,
-  encode
+  unifyTranscriptStyle
 } from './services/geminiService';
 import { processLargeAudioFile } from './services/audioUtils';
 import { 
@@ -24,64 +22,59 @@ import {
 import { AudioUploader } from './components/AudioUploader';
 import { ResultCard } from './components/ResultCard';
 import { HistoryModal } from './components/HistoryModal';
-import { ProgressBar } from './components/ProgressBar';
 import { 
-  PlayCircle, 
-  PauseCircle, 
   X, 
   Languages, 
   ArrowRight, 
-  FileAudio, 
   History, 
-  Archive, 
-  FileText, 
-  ListTodo,
-  Mic,
-  Square
+  FileAudio,
+  CheckCircle2
 } from './components/Icons';
 
-type RightPanelMode = 'translation' | 'summary';
+declare global {
+  interface AIStudio {
+    hasSelectedApiKey: () => Promise<boolean>;
+    openSelectKey: () => Promise<void>;
+  }
+  interface Window {
+    // FIX: All declarations of 'aistudio' must have identical modifiers. 
+    // Making it optional to match the environment's base definition.
+    aistudio?: AIStudio;
+  }
+}
 
 export default function App() {
-  const [audioState, setAudioState] = useState<AudioFileState>({
-    file: null,
-    base64: null,
-    mimeType: null,
-    duration: null
-  });
-
+  const [audioState, setAudioState] = useState<AudioFileState>({ file: null, base64: null, mimeType: null, duration: null });
   const [activeRecordId, setActiveRecordId] = useState<string | null>(null);
-  const [historyFileName, setHistoryFileName] = useState<string | null>(null);
-
-  const [transcription, setTranscription] = useState<TranscriptionState>({
-    text: '',
-    isTranscribing: false,
-    isRecording: false,
-    progress: 0,
-    error: null
-  });
-
-  const [translation, setTranslation] = useState<TranslationState>({
-    translations: {},
-    summaries: {},
-    isTranslating: false,
-    isSummarizing: false,
-    progress: 0,
-    error: null
-  });
-
+  const [transcription, setTranscription] = useState<TranscriptionState>({ text: '', isTranscribing: false, progress: 0, error: null });
+  const [translation, setTranslation] = useState<TranslationState>({ translations: {}, summaries: {}, isTranslating: false, isSummarizing: false, progress: 0, error: null });
   const [selectedTargetLang, setSelectedTargetLang] = useState<SupportedLanguage>(SupportedLanguage.CHINESE_SIMPLIFIED);
-  const [rightPanelMode, setRightPanelMode] = useState<RightPanelMode>('translation');
+  const [rightPanelMode, setRightPanelMode] = useState<'translation' | 'summary'>('translation');
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [history, setHistory] = useState<ArchiveRecord[]>([]);
-  
-  const liveSessionRef = useRef<any>(null);
-  const audioStreamRef = useRef<MediaStream | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
+  const [hasApiKey, setHasApiKey] = useState(false);
 
   useEffect(() => {
     setHistory(getArchive());
+    checkApiKey();
   }, []);
+
+  const checkApiKey = async () => {
+    try {
+      // FIX: Use optional chaining to avoid crashing if aistudio is missing.
+      const selected = await window.aistudio?.hasSelectedApiKey();
+      setHasApiKey(!!selected);
+    } catch (e) {
+      console.error("API check failed", e);
+    }
+  };
+
+  const handleOpenKeySelection = async () => {
+    // FIX: Use optional chaining for safety when triggering the key selection dialog.
+    await window.aistudio?.openSelectKey();
+    setHasApiKey(true);
+    setTranscription(prev => ({ ...prev, error: null }));
+  };
 
   const handleFileSelect = async (file: File) => {
     const existing = findRecordForFile(file);
@@ -92,73 +85,89 @@ export default function App() {
 
     setAudioState({ file, base64: null, mimeType: file.type, duration: null });
     setActiveRecordId(null);
-    setHistoryFileName(null);
-    setTranscription({ text: '', isTranscribing: true, isRecording: false, progress: 0, error: null });
+    setTranscription({ text: '', isTranscribing: true, progress: 0, error: null });
     setTranslation({ translations: {}, summaries: {}, isTranslating: false, isSummarizing: false, progress: 0, error: null });
 
     try {
       const chunks = await processLargeAudioFile(file);
-      let fullTranscript = "";
-      for (let i = 0; i < chunks.length; i++) {
-        const part = await transcribeAudio(chunks[i], 'audio/wav');
-        fullTranscript += part + "\n";
-        setTranscription(prev => ({ 
-          ...prev, 
-          text: fullTranscript,
-          progress: Math.round(((i + 1) / chunks.length) * 100) 
-        }));
-      }
+      const results: string[] = new Array(chunks.length).fill("");
+      let completedChunks = 0;
 
-      const unified = await unifyTranscriptStyle(fullTranscript);
-      setTranscription(prev => ({ ...prev, text: unified, isTranscribing: false, progress: 100 }));
+      const CONCURRENCY = 2;
+      const queue = [...chunks.keys()];
+      
+      const worker = async () => {
+        while (queue.length > 0) {
+          const idx = queue.shift()!;
+          try {
+            const part = await transcribeAudio(chunks[idx], 'audio/wav', true);
+            results[idx] = part;
+          } catch (err: any) {
+            if (err.message === "QUOTA_EXHAUSTED" || err.message.includes("Requested entity")) throw err;
+            results[idx] = `[分段 ${idx + 1} 识别失败]`;
+          } finally {
+            completedChunks++;
+            const progress = Math.round((completedChunks / chunks.length) * 90);
+            setTranscription(prev => ({ 
+              ...prev, 
+              progress,
+              text: results.filter(r => r).join('\n\n')
+            }));
+          }
+        }
+      };
+
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, chunks.length) }).map(worker));
+
+      const rawText = results.filter(r => r && !r.includes("识别失败")).join('\n\n');
+      if (!rawText.trim()) throw new Error("识别结果为空，请检查音频质量。");
+
+      setTranscription(prev => ({ ...prev, progress: 95 }));
+      const finalTranscript = rawText.length < 25000 ? await unifyTranscriptStyle(rawText) : rawText;
+
+      setTranscription(prev => ({ ...prev, text: finalTranscript, isTranscribing: false, progress: 100 }));
       
       const record: ArchiveRecord = {
         id: `${file.name}-${Date.now()}`,
-        fileName: file.name,
-        fileSize: file.size,
-        lastModified: file.lastModified,
-        mimeType: file.type,
-        transcription: unified,
-        translations: {},
-        createdAt: Date.now()
+        fileName: file.name, fileSize: file.size, lastModified: file.lastModified,
+        mimeType: file.type, transcription: finalTranscript, translations: {}, createdAt: Date.now()
       };
+      
       saveRecord(record);
       setActiveRecordId(record.id);
       setHistory(getArchive());
     } catch (err: any) {
-      setTranscription(prev => ({ ...prev, isTranscribing: false, error: err.message || "Transcription process failed" }));
+      let msg = err.message || String(err);
+      if (msg.includes("Requested entity")) {
+        setHasApiKey(false);
+        await handleOpenKeySelection();
+        return;
+      }
+      setTranscription(prev => ({ ...prev, isTranscribing: false, error: msg === "QUOTA_EXHAUSTED" ? "配额用尽，请设置 API Key。" : msg }));
     }
   };
 
-  const loadRecord = (record: ArchiveRecord) => {
-    setActiveRecordId(record.id);
-    setHistoryFileName(record.fileName);
-    setTranscription({ text: record.transcription, isTranscribing: false, isRecording: false, progress: 100, error: null });
-    setTranslation({ translations: record.translations, summaries: record.summaries || {}, isTranslating: false, isSummarizing: false, progress: 100, error: null });
-    setAudioState({ file: null, base64: null, mimeType: record.mimeType, duration: null });
+  const loadRecord = (rec: ArchiveRecord) => {
+    setActiveRecordId(rec.id);
+    setTranscription({ text: rec.transcription, isTranscribing: false, progress: 100, error: null });
+    setTranslation({ 
+      translations: rec.translations, 
+      summaries: rec.summaries || {}, 
+      isTranslating: false, isSummarizing: false, 
+      progress: 100, error: null 
+    });
   };
 
   const handleTranslate = async () => {
     if (!transcription.text || translation.isTranslating) return;
     setTranslation(prev => ({ ...prev, isTranslating: true, progress: 0, error: null }));
     try {
-      const translated = await translateText(transcription.text, selectedTargetLang, (p) => {
-        setTranslation(prev => ({ ...prev, progress: p }));
-      });
-      const newTranslations = { ...translation.translations, [selectedTargetLang]: translated };
-      setTranslation(prev => ({ ...prev, translations: newTranslations, isTranslating: false, progress: 100 }));
-      
-      if (activeRecordId) {
-        const archive = getArchive();
-        const rec = archive.find(r => r.id === activeRecordId);
-        if (rec) {
-          rec.translations = newTranslations;
-          saveRecord(rec);
-          setHistory(getArchive());
-        }
-      }
-    } catch (err: any) {
-      setTranslation(prev => ({ ...prev, isTranslating: false, error: err.message || "Translation failed" }));
+      const res = await translateText(transcription.text, selectedTargetLang, (p) => setTranslation(prev => ({ ...prev, progress: p })));
+      const newTrans = { ...translation.translations, [selectedTargetLang]: res };
+      setTranslation(prev => ({ ...prev, translations: newTrans, isTranslating: false }));
+      updateRecordInStorage({ translations: newTrans });
+    } catch (err) {
+      setTranslation(prev => ({ ...prev, isTranslating: false, error: "翻译失败" }));
     }
   };
 
@@ -166,214 +175,147 @@ export default function App() {
     if (!transcription.text || translation.isSummarizing) return;
     setTranslation(prev => ({ ...prev, isSummarizing: true, progress: 0, error: null }));
     try {
-      const summary = await generateSummary(transcription.text, selectedTargetLang);
-      const newSummaries = { ...translation.summaries, [selectedTargetLang]: summary };
-      setTranslation(prev => ({ ...prev, summaries: newSummaries, isSummarizing: false, progress: 100 }));
-      
-      if (activeRecordId) {
-        const archive = getArchive();
-        const rec = archive.find(r => r.id === activeRecordId);
-        if (rec) {
-          rec.summaries = newSummaries;
-          saveRecord(rec);
-          setHistory(getArchive());
-        }
-      }
-    } catch (err: any) {
-      setTranslation(prev => ({ ...prev, isSummarizing: false, error: err.message || "Summary generation failed" }));
+      const res = await generateSummary(transcription.text, selectedTargetLang);
+      const newSums = { ...translation.summaries, [selectedTargetLang]: res };
+      setTranslation(prev => ({ ...prev, summaries: newSums, isSummarizing: false }));
+      updateRecordInStorage({ summaries: newSums });
+    } catch (err) {
+      setTranslation(prev => ({ ...prev, isSummarizing: false, error: "总结失败" }));
     }
   };
 
-  const handleToggleLive = async () => {
-    if (transcription.isRecording) {
-      if (audioStreamRef.current) audioStreamRef.current.getTracks().forEach(t => t.stop());
-      if (liveSessionRef.current) {
-        const session = await liveSessionRef.current;
-        session.close();
-      }
-      if (audioContextRef.current) await audioContextRef.current.close();
-      
-      setTranscription(prev => {
-        if (prev.text.trim()) {
-          const record: ArchiveRecord = {
-            id: `live-${Date.now()}`,
-            fileName: `Live Session ${new Date().toLocaleString()}`,
-            fileSize: 0,
-            lastModified: Date.now(),
-            mimeType: 'audio/pcm',
-            transcription: prev.text,
-            translations: {},
-            createdAt: Date.now(),
-            isLiveRecording: true
-          };
-          saveRecord(record);
-          setActiveRecordId(record.id);
-          setHistory(getArchive());
-        }
-        return { ...prev, isRecording: false };
-      });
-      return;
-    }
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioStreamRef.current = stream;
-      
-      const ctx = new AudioContext({ sampleRate: 16000 });
-      audioContextRef.current = ctx;
-      const source = ctx.createMediaStreamSource(stream);
-      const processor = ctx.createScriptProcessor(4096, 1, 1);
-      
-      const sessionPromise = startLiveTranscription({
-        onTranscript: (text) => setTranscription(prev => ({ ...prev, text: prev.text + text })),
-        onTurnComplete: () => setTranscription(prev => ({ ...prev, text: prev.text + '\n' })),
-        onError: (err) => setTranscription(prev => ({ ...prev, error: "Connection error. Please try again.", isRecording: false })),
-        onClose: () => setTranscription(prev => ({ ...prev, isRecording: false }))
-      });
-      
-      liveSessionRef.current = sessionPromise;
-      
-      processor.onaudioprocess = (e) => {
-        const inputData = e.inputBuffer.getChannelData(0);
-        const int16 = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) int16[i] = inputData[i] * 32768;
-        const pcmBlob = {
-          data: encode(new Uint8Array(int16.buffer)),
-          mimeType: 'audio/pcm;rate=16000',
-        };
-        sessionPromise.then(session => session.sendRealtimeInput({ media: pcmBlob }));
-      };
-      
-      source.connect(processor);
-      processor.connect(ctx.destination);
-      
-      setTranscription({ text: '', isTranscribing: false, isRecording: true, progress: 0, error: null });
-      setActiveRecordId(null);
-    } catch (err: any) {
-      alert("Microphone access denied: " + err.message);
+  const updateRecordInStorage = (updates: Partial<ArchiveRecord>) => {
+    if (!activeRecordId) return;
+    const archive = getArchive();
+    const rec = archive.find(r => r.id === activeRecordId);
+    if (rec) {
+      Object.assign(rec, updates);
+      saveRecord(rec);
+      setHistory(getArchive());
     }
   };
 
-  const hasContent = transcription.text || transcription.isTranscribing || audioState.file || historyFileName || transcription.isRecording;
+  const hasContent = transcription.text || transcription.isTranscribing;
 
   return (
-    <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
-      <header className="sticky top-0 z-50 border-b border-slate-200 bg-white/80 backdrop-blur-md">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4 sm:px-6 lg:px-8">
+    <div className="h-screen flex flex-col bg-[#F8FAFC] font-sans text-slate-900 overflow-hidden">
+      <header className="shrink-0 border-b border-slate-200 bg-white/80 backdrop-blur-md">
+        <div className="mx-auto flex max-w-[1600px] items-center justify-between px-6 py-3">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-indigo-200 shadow-lg">
-              <Languages className="h-6 w-6" />
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-lg">
+              <Languages className="h-5 w-5" />
             </div>
             <div>
-              <h1 className="text-xl font-bold tracking-tight text-slate-900">AudioGlot</h1>
-              <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">AI Meeting Intelligence</p>
+              <h1 className="text-lg font-black text-slate-900 leading-tight">AudioGlot AI</h1>
+              <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1">
+                <span className={`h-1.5 w-1.5 rounded-full ${hasApiKey ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                {hasApiKey ? 'Performance' : 'Standard'}
+              </span>
             </div>
           </div>
-          <button 
-            onClick={() => setIsHistoryOpen(true)}
-            className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:shadow-md"
-          >
-            <History className="h-4 w-4" />
-            <span>History</span>
-          </button>
+          
+          <div className="flex items-center gap-3">
+            <button onClick={handleOpenKeySelection} className="rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-black text-slate-700 hover:bg-slate-50 transition-all shadow-sm">
+              API 管理
+            </button>
+            <button onClick={() => setIsHistoryOpen(true)} className="flex items-center gap-2 rounded-full bg-slate-900 px-4 py-2 text-xs font-black text-white hover:bg-slate-800 transition-all shadow-lg">
+              <History className="h-4 w-4" /> 历史记录
+            </button>
+          </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-        <div className="grid grid-cols-1 gap-8 lg:grid-cols-12">
-          <div className="lg:col-span-4 space-y-6">
-            <div className="rounded-2xl bg-white p-6 shadow-sm border border-slate-100">
-              <h2 className="mb-4 text-sm font-bold uppercase tracking-wider text-slate-400">Audio Input</h2>
-              <AudioUploader onFileSelect={handleFileSelect} disabled={transcription.isTranscribing || transcription.isRecording} />
-              
-              <div className="mt-6 flex flex-col gap-3">
-                <button
-                  onClick={handleToggleLive}
-                  disabled={transcription.isTranscribing}
-                  className={`flex w-full items-center justify-center gap-3 rounded-xl py-3 text-sm font-bold transition-all ${
-                    transcription.isRecording ? 'bg-red-50 text-red-600 hover:bg-red-100' : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg'
-                  }`}
-                >
-                  {transcription.isRecording ? <><Square className="h-4 w-4 fill-current" /> Stop Live Session</> : <><Mic className="h-4 w-4" /> Record Live Meeting</>}
-                </button>
-                
-                {(audioState.file || historyFileName) && !transcription.isRecording && (
-                  <div className="flex items-center gap-3 rounded-xl bg-slate-50 p-3 border border-slate-100">
-                    <FileAudio className="h-5 w-5 text-indigo-500" />
-                    <span className="text-xs font-medium text-slate-600 truncate">{audioState.file?.name || historyFileName}</span>
-                    <button onClick={() => { setAudioState({file:null,base64:null,mimeType:null,duration:null}); setTranscription({text:'',isTranscribing:false,isRecording:false,progress:0,error:null}); setTranslation({translations: {}, summaries: {}, isTranslating: false, isSummarizing: false, progress: 0, error: null}); }} className="ml-auto text-slate-400 hover:text-slate-600"><X className="h-4 w-4" /></button>
-                  </div>
-                )}
-              </div>
+      <main className="flex-1 overflow-hidden p-6">
+        <div className="mx-auto max-w-[1600px] h-full grid grid-cols-1 gap-6 lg:grid-cols-12">
+          {/* Left Panel: Upload & Controls */}
+          <div className="lg:col-span-3 flex flex-col gap-6 overflow-y-auto pr-2 custom-scrollbar">
+            <div className="shrink-0 rounded-[2rem] bg-white p-6 shadow-sm border border-slate-100">
+              <h2 className="mb-4 text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 flex items-center gap-2">
+                <span className="h-1 w-3 bg-indigo-600 rounded-full" /> 音频解析
+              </h2>
+              <AudioUploader onFileSelect={handleFileSelect} disabled={transcription.isTranscribing} />
             </div>
 
             {hasContent && (
-              <div className="rounded-2xl bg-white p-6 shadow-sm border border-slate-100">
-                <h2 className="mb-4 text-sm font-bold uppercase tracking-wider text-slate-400">Processing Options</h2>
-                <div className="space-y-4">
+              <div className="rounded-[2rem] bg-slate-900 p-6 shadow-2xl text-white border border-slate-800 animate-in fade-in slide-in-from-left-4">
+                <h2 className="mb-6 text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 flex items-center gap-2">
+                  <span className="h-1 w-3 bg-indigo-400 rounded-full" /> 智能指令
+                </h2>
+                
+                <div className="space-y-5">
                   <div>
-                    <label className="mb-2 block text-xs font-semibold text-slate-700">Target Translation Language</label>
-                    <select value={selectedTargetLang} onChange={(e) => setSelectedTargetLang(e.target.value as SupportedLanguage)} className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm focus:border-indigo-500">
-                      {Object.values(SupportedLanguage).map(lang => <option key={lang} value={lang}>{lang}</option>)}
+                    <label className="mb-2 block text-[9px] font-black text-slate-400 uppercase tracking-widest">目标输出语言</label>
+                    <select 
+                      value={selectedTargetLang}
+                      onChange={(e) => setSelectedTargetLang(e.target.value as SupportedLanguage)}
+                      className="w-full rounded-xl border-0 bg-white/10 p-4 text-xs font-bold text-white ring-1 ring-white/20 focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                    >
+                      {Object.values(SupportedLanguage).map(lang => (
+                        <option key={lang} value={lang} className="text-slate-900">{lang}</option>
+                      ))}
                     </select>
                   </div>
-                  
-                  <div className="flex gap-2">
-                    <button onClick={() => setRightPanelMode('translation')} className={`flex-1 flex items-center justify-center gap-2 rounded-xl py-2.5 text-xs font-bold transition-all ${rightPanelMode === 'translation' ? 'bg-indigo-50 text-indigo-700 border border-indigo-200' : 'bg-white text-slate-600 border border-slate-100'}`}>
-                      <FileText className="h-3.5 w-3.5" /> Translation
-                    </button>
-                    <button onClick={() => setRightPanelMode('summary')} className={`flex-1 flex items-center justify-center gap-2 rounded-xl py-2.5 text-xs font-bold transition-all ${rightPanelMode === 'summary' ? 'bg-indigo-50 text-indigo-700 border border-indigo-200' : 'bg-white text-slate-600 border border-slate-100'}`}>
-                      <ListTodo className="h-3.5 w-3.5" /> Summary
-                    </button>
+
+                  <div className="flex p-1 bg-white/5 rounded-xl">
+                    <button onClick={() => setRightPanelMode('translation')} className={`flex-1 py-2.5 text-[11px] font-black rounded-lg transition-all ${rightPanelMode === 'translation' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-500 hover:text-white'}`}>全文翻译</button>
+                    <button onClick={() => setRightPanelMode('summary')} className={`flex-1 py-2.5 text-[11px] font-black rounded-lg transition-all ${rightPanelMode === 'summary' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-500 hover:text-white'}`}>智能总结</button>
                   </div>
 
                   <button
                     onClick={rightPanelMode === 'translation' ? handleTranslate : handleSummarize}
-                    disabled={!transcription.text || transcription.isTranscribing || translation.isTranslating || translation.isSummarizing || transcription.isRecording}
-                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-slate-900 py-3 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-50"
+                    disabled={!transcription.text || transcription.isTranscribing || translation.isTranslating || translation.isSummarizing}
+                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-white py-4 text-xs font-black text-slate-900 hover:bg-indigo-50 transition-all active:scale-95 disabled:opacity-20 disabled:active:scale-100"
                   >
-                    {rightPanelMode === 'translation' ? 'Translate Transcript' : 'Generate Summary'}
-                    <ArrowRight className="h-4 w-4" />
+                    执行分析 <ArrowRight className="h-4 w-4" />
                   </button>
                 </div>
               </div>
             )}
           </div>
 
-          <div className="lg:col-span-8 space-y-6">
+          {/* Right Panel: Result Display */}
+          <div className="lg:col-span-9 h-full flex flex-col gap-6 overflow-hidden">
             {!hasContent ? (
-              <div className="flex h-full min-h-[400px] flex-col items-center justify-center rounded-3xl border-2 border-dashed border-slate-200 bg-white p-12 text-center">
-                <div className="mb-6 rounded-full bg-indigo-50 p-6 text-indigo-600"><Mic className="h-12 w-12" /></div>
-                <h3 className="text-2xl font-bold text-slate-900">Transcript Workspace</h3>
-                <p className="mt-2 text-slate-500 max-w-md">Upload audio or start a live recording to begin. Your audio will be transcribed verbatim in its original language.</p>
+              <div className="flex h-full flex-col items-center justify-center rounded-[3rem] border-2 border-dashed border-slate-200 bg-white/50 p-12 text-center group">
+                <div className="mb-8 rounded-full bg-white p-10 shadow-xl text-indigo-500 group-hover:scale-110 transition-all duration-500 ring-8 ring-indigo-50/50">
+                  <FileAudio className="h-12 w-12" />
+                </div>
+                <h3 className="text-2xl font-black text-slate-900 tracking-tight">准备就绪</h3>
+                <p className="mt-3 text-slate-500 max-w-sm font-medium leading-relaxed text-sm">
+                  请上传音频文件。我们将采用高精度识别模型，为您还原最真实的对话内容。
+                </p>
               </div>
             ) : (
-              <div className="grid h-full grid-cols-1 gap-6 lg:grid-cols-2">
+              <div className="flex-1 grid grid-cols-1 gap-6 lg:grid-cols-2 h-full overflow-hidden">
                 <ResultCard 
-                  title="Verbatim Transcript"
-                  content={transcription.text}
-                  isLoading={transcription.isTranscribing}
-                  progress={transcription.progress}
-                  placeholder={transcription.isRecording ? "Listening... original audio will appear here verbatim." : "Transcription will appear here in the source language."}
-                  variant="primary"
+                  title="识别原文" 
+                  content={transcription.text} 
+                  isLoading={transcription.isTranscribing} 
+                  progress={transcription.progress} 
+                  variant="primary" 
                 />
                 <ResultCard 
-                  title={rightPanelMode === 'translation' ? "AI Translation" : "Meeting Summary"}
-                  content={rightPanelMode === 'translation' ? (translation.translations[selectedTargetLang] || "") : (translation.summaries[selectedTargetLang] || "")}
-                  isLoading={rightPanelMode === 'translation' ? translation.isTranslating : translation.isSummarizing}
-                  progress={translation.progress}
-                  language={selectedTargetLang}
-                  placeholder={rightPanelMode === 'translation' ? "Select a target language and click 'Translate Transcript'." : "Click 'Generate Summary' to distill key insights."}
-                  variant="secondary"
+                  title={rightPanelMode === 'translation' ? "AI 翻译" : "分析报告"} 
+                  content={rightPanelMode === 'translation' ? (translation.translations[selectedTargetLang] || "") : (translation.summaries[selectedTargetLang] || "")} 
+                  isLoading={rightPanelMode === 'translation' ? translation.isTranslating : translation.isSummarizing} 
+                  progress={translation.progress} 
+                  language={selectedTargetLang} 
+                  variant="secondary" 
                 />
               </div>
             )}
-            {transcription.error && <div className="rounded-xl bg-red-50 p-4 border border-red-100 text-sm text-red-600 flex items-center gap-3"><X className="h-5 w-5" /><span>{transcription.error}</span></div>}
+
+            {transcription.error && (
+              <div className="shrink-0 rounded-xl bg-red-50 p-4 border border-red-100 text-[11px] font-bold text-red-600 flex items-center gap-3 animate-in slide-in-from-top-2">
+                <div className="bg-red-600 text-white rounded-full p-1"><X className="h-3 w-3" /></div>
+                <span>{transcription.error}</span>
+              </div>
+            )}
           </div>
         </div>
       </main>
 
-      <HistoryModal isOpen={isHistoryOpen} onClose={() => setIsHistoryOpen(false)} history={history} onSelect={(rec) => { loadRecord(rec); setIsHistoryOpen(false); }} onDelete={(id) => { const newArchive = deleteRecord(id); setHistory(newArchive); if (activeRecordId === id) setActiveRecordId(null); }} />
+      <HistoryModal isOpen={isHistoryOpen} onClose={() => setIsHistoryOpen(false)} history={history} onSelect={(rec) => { loadRecord(rec); setIsHistoryOpen(false); }} onDelete={(id) => { setHistory(deleteRecord(id)); }} />
     </div>
   );
 }

@@ -28,7 +28,6 @@ export interface AudioFileState {
 export interface TranscriptionState {
   text: string;
   isTranscribing: boolean;
-  isRecording: boolean;
   progress: number; // 0-100
   error: string | null;
 }
@@ -52,5 +51,4 @@ export interface ArchiveRecord {
   translations: Record<string, string>;
   summaries?: Record<string, string>;
   createdAt: number;
-  isLiveRecording?: boolean;
 }

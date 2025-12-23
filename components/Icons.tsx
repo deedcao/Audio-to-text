@@ -20,7 +20,10 @@ import {
   ListTodo,
   Mic,
   MicOff,
-  Square
+  Square,
+  Search,
+  ArrowDown,
+  ArrowUp
 } from 'lucide-react';
 
 export { 
@@ -43,5 +46,8 @@ export {
   ListTodo,
   Mic,
   MicOff,
-  Square
+  Square,
+  Search,
+  ArrowDown,
+  ArrowUp
 };

@@ -1,7 +1,5 @@
 {
   "name": "AudioGlot AI",
-  "description": "A professional audio transcription and translation tool powered by Gemini 2.5 Flash. Upload files or record live meetings with real-time speaker identification.",
-  "requestFramePermissions": [
-    "microphone"
-  ]
+  "description": "A professional audio transcription and translation tool powered by Gemini 2.5 Flash. Upload files for high-precision transcription and multilingual translation.",
+  "requestFramePermissions": []
 }

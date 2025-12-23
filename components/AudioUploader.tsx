@@ -1,4 +1,5 @@
-import React, { useCallback, useState } from 'react';
+
+import React, { useCallback, useState, useRef } from 'react';
 import { UploadCloud, FileAudio } from './Icons';
 
 interface AudioUploaderProps {
@@ -8,6 +9,7 @@ interface AudioUploaderProps {
 
 export const AudioUploader: React.FC<AudioUploaderProps> = ({ onFileSelect, disabled }) => {
   const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -33,21 +35,17 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({ onFileSelect, disa
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       validateAndProcess(e.target.files[0]);
+      // Reset input value to allow selecting the same file again if a failure occurs
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
     }
   };
 
   const validateAndProcess = (file: File) => {
-    const validMimeTypes = [
-      'audio/mpeg', 'audio/mp3', 
-      'audio/wav', 'audio/x-wav',
-      'audio/mp4', 'audio/x-m4a', 'audio/m4a',
-      'application/octet-stream' // often m4a shows up as this
-    ];
-    
     const ext = file.name.split('.').pop()?.toLowerCase();
     const validExtensions = ['mp3', 'wav', 'm4a', 'mp4'];
     
-    // Check extension primarily as MIME type detection in browser can be spotty for m4a
     const isValidExtension = ext && validExtensions.includes(ext);
 
     if (!isValidExtension) {
@@ -55,8 +53,6 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({ onFileSelect, disa
       return;
     }
 
-    // Size limit check removed as requested
-    
     onFileSelect(file);
   };
 
@@ -75,6 +71,7 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({ onFileSelect, disa
       `}
     >
       <input
+        ref={fileInputRef}
         type="file"
         accept=".mp3,.wav,.m4a,.mp4,audio/mpeg,audio/wav,audio/mp4,audio/x-m4a"
         onChange={handleInputChange}
@@ -94,6 +91,7 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({ onFileSelect, disa
         <button 
           className="rounded-full bg-slate-900 px-6 py-2 text-sm font-medium text-white shadow-sm transition-transform hover:scale-105 active:scale-95 disabled:pointer-events-none"
           type="button"
+          disabled={disabled}
         >
           Select File
         </button>

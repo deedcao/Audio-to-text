@@ -1,3 +1,4 @@
+
 /**
  * Audio processing utilities to handle large files by resampling and chunking.
  * This allows us to bypass the 20MB API payload limit by sending smaller, optimized chunks.
@@ -94,11 +95,12 @@ export const processLargeAudioFile = async (file: File): Promise<string[]> => {
     const pcmData = await resampleAndMixDown(audioBuffer);
 
     // 3. Chunk it
-    // Increased to 5 minutes (300 seconds) to optimize speed.
-    // 300 * 16000 samples = 4,800,000 samples
-    // 4,800,000 * 2 bytes = ~9.6 MB raw PCM -> ~12.8 MB Base64
-    // This fits safely within the 20MB Gemini API limit while reducing total request count.
-    const SAMPLES_PER_CHUNK = 300 * SAMPLE_RATE; 
+    // Increase chunk size to 180 seconds (3 minutes)
+    // Larger chunks provide much better context for the LLM to understand flow
+    // 180 * 16000 samples = 2,880,000 samples
+    // 2,880,000 * 2 bytes = ~5.76 MB raw PCM -> ~7.6 MB Base64
+    // This is well within the typical 20MB limit for API requests.
+    const SAMPLES_PER_CHUNK = 180 * SAMPLE_RATE; 
     const chunks: string[] = [];
 
     for (let i = 0; i < pcmData.length; i += SAMPLES_PER_CHUNK) {
@@ -113,7 +115,7 @@ export const processLargeAudioFile = async (file: File): Promise<string[]> => {
 
   } catch (error) {
     console.error("Error processing audio file:", error);
-    throw new Error("Failed to process audio file. It might be corrupt or too complex to decode in browser.");
+    throw new Error("音频解码失败。文件可能损坏，或超出了浏览器处理能力。");
   }
 };
 
